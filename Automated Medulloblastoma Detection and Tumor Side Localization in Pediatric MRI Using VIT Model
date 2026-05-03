@@ -1,0 +1,82 @@
+import tensorflow as tf
+from tensorflow.keras import layers, models
+import numpy as np
+
+# Parameters
+image_size = 64
+patch_size = 16
+numpatches = (image_size // patch_size) ** 2
+embedding_dim = 64
+numheads = 4
+num_classes = 3  # Left, Midline, Right
+
+# Patch extraction
+class Patches(layers.Layer):
+    def call(self, images):
+        batch_size = tf.shape(images)[0]
+        patches = tf.image.extract_patches(
+            images=images,
+            sizes=[1, patch_size, patch_size, 1],
+            strides=[1, patch_size, patch_size, 1],
+            rates=[1, 1, 1, 1],
+            padding='VALID'
+        )
+        patches = tf.reshape(patches, [batch_size, numpatches, -1])
+        return patches
+
+# Patch embedding
+class PatchEncoder(layers.Layer):
+    def __init__(self):
+        super().__init__()
+        self.projection = layers.Dense(embedding_dim)
+        self.position_embedding = layers.Embedding(
+            input_dim=numpatches, output_dim=embedding_dim
+        )
+
+    def call(self, patches):
+        positions = tf.range(start=0, limit=numpatches, delta=1)
+        return self.projection(patches) + self.position_embedding(positions)
+
+# Vision Transformer Model
+def create_vit_model():
+    inputs = layers.Input(shape=(64, 64, 1))
+
+    patches = Patches()(inputs)
+    encoded_patches = PatchEncoder()(patches)
+
+    for _ in range(4):
+        x1 = layers.LayerNormalization()(encoded_patches)
+        attention_output = layers.MultiHeadAttention(
+            num_heads=numheads, key_dim=embedding_dim
+        )(x1, x1)
+
+        x2 = layers.Add()([attention_output, encoded_patches])
+
+        x3 = layers.LayerNormalization()(x2)
+        x3 = layers.Dense(embedding_dim, activation="relu")(x3)
+        x3 = layers.Dense(embedding_dim)(x3)
+
+        encoded_patches = layers.Add()([x3, x2])
+
+    representation = layers.LayerNormalization()(encoded_patches)
+    representation = layers.GlobalAveragePooling1D()(representation)
+
+    tumor_detection = layers.Dense(1, activation="sigmoid", name="detection")(representation)
+    tumor_location = layers.Dense(num_classes, activation="softmax", name="location")(representation)
+
+    model = models.Model(inputs=inputs, outputs=[tumor_detection, tumor_location])
+
+    model.compile(
+        optimizer='adam',
+        loss={
+            "detection": "binary_crossentropy",
+            "location": "categorical_crossentropy"
+        },
+        metrics=["accuracy"]
+    )
+
+    return model
+
+# Create and summarize model
+model = create_vit_model()
+model.summary()
